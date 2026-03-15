@@ -9,7 +9,7 @@ import { getBearerHandler, WebApi } from "azure-devops-node-api";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
-import { createAuthenticator } from "./auth.js";
+import { createAuthenticator, proxyAuthStore } from "./auth.js";
 import { logger } from "./logger.js";
 import { getOrgTenant } from "./org-tenants.js";
 //import { configurePrompts } from "./prompts.js";
@@ -47,7 +47,7 @@ const argv = yargs(hideBin(process.argv))
     alias: "a",
     describe: "Type of authentication to use",
     type: "string",
-    choices: ["interactive", "azcli", "env", "envvar"],
+    choices: ["interactive", "azcli", "env", "envvar", "proxy"],
     default: defaultAuthenticationType,
   })
   .option("tenant", {
@@ -110,6 +110,43 @@ async function main() {
   // configurePrompts(server);
 
   configureAllTools(server, authenticator, getAzureDevOpsClient(authenticator, userAgentComposer), () => userAgentComposer.userAgent, enabledDomains);
+
+  // In proxy mode, inject a required `_auth_token` argument into every
+  // registered tool and wrap its callback so the token is stored in
+  // request-scoped AsyncLocalStorage before the original handler runs.
+  // This eliminates global mutable state and race conditions when a
+  // single server instance handles concurrent requests for multiple users.
+  if (argv.authentication === "proxy") {
+    const { z } = await import("zod");
+    const authTokenSchema = z.string({ required_error: "Auth token is required in proxy mode" }).describe("Bearer token for proxy authentication");
+
+    const registeredTools = (server as any)._registeredTools as Record<
+      string,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { inputSchema?: any; handler: (...args: unknown[]) => unknown }
+    >;
+
+    for (const [, tool] of Object.entries(registeredTools)) {
+      const originalHandler = tool.handler;
+
+      // The SDK stores inputSchema as a ZodObject (via getZodSchemaObject),
+      // so we must use .extend() to add the _auth_token field properly.
+      if (tool.inputSchema && typeof tool.inputSchema.extend === "function") {
+        tool.inputSchema = tool.inputSchema.extend({ _auth_token: authTokenSchema });
+      } else {
+        tool.inputSchema = z.object({ _auth_token: authTokenSchema });
+      }
+
+      tool.handler = (...cbArgs: unknown[]) => {
+        const args = cbArgs[0] as Record<string, unknown>;
+        const extra = cbArgs[1];
+        const { _auth_token, ...toolArgs } = args as { _auth_token: string; [k: string]: unknown };
+        return proxyAuthStore.run(_auth_token, () => originalHandler(toolArgs, extra));
+      };
+    }
+
+    logger.info(`Proxy mode: ${Object.keys(registeredTools).length} tools wrapped with per-request _auth_token`);
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
