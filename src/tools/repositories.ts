@@ -186,7 +186,7 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<stri
 
         const labelDefinitions: WebApiTagDefinition[] | undefined = labels ? labels.map((label) => ({ name: label })) : undefined;
 
-        const pullRequest = await gitApi.createPullRequest(
+        let pullRequest = await gitApi.createPullRequest(
           {
             sourceRefName,
             targetRefName,
@@ -200,6 +200,17 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<stri
           },
           repositoryId
         );
+
+        if (!pullRequest) {
+          const prs = await gitApi.getPullRequests(repositoryId, { sourceRefName, targetRefName, status: PullRequestStatus.Active }, undefined, undefined, 0, 1);
+          if (prs && prs.length > 0) {
+            pullRequest = prs[0];
+          } else {
+            return {
+              content: [{ type: "text", text: "Pull request created but API returned no data." }],
+            };
+          }
+        }
 
         const trimmedPullRequest = trimPullRequest(pullRequest, true);
 
@@ -935,16 +946,19 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<stri
     REPO_TOOLS.get_pull_request_by_id,
     "Get a pull request by its ID.",
     {
-      repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+      repositoryId: z
+        .string()
+        .describe("The ID or name of the repository where the pull request is located. When using a repository name instead of a GUID, the project parameter must also be provided."),
       pullRequestId: z.number().describe("The ID of the pull request to retrieve."),
+      project: z.string().optional().describe("Project ID or project name. Required when repositoryId is a repository name instead of a GUID."),
       includeWorkItemRefs: z.boolean().optional().default(false).describe("Whether to reference work items associated with the pull request."),
       includeLabels: z.boolean().optional().default(false).describe("Whether to include a summary of labels in the response."),
     },
-    async ({ repositoryId, pullRequestId, includeWorkItemRefs, includeLabels }) => {
+    async ({ repositoryId, pullRequestId, project, includeWorkItemRefs, includeLabels }) => {
       try {
         const connection = await connectionProvider();
         const gitApi = await connection.getGitApi();
-        const pullRequest = await gitApi.getPullRequest(repositoryId, pullRequestId, undefined, undefined, undefined, undefined, undefined, includeWorkItemRefs);
+        const pullRequest = await gitApi.getPullRequest(repositoryId, pullRequestId, project, undefined, undefined, undefined, undefined, includeWorkItemRefs);
 
         if (includeLabels) {
           try {
