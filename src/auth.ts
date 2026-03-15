@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { AzureCliCredential, ChainedTokenCredential, DefaultAzureCredential, TokenCredential } from "@azure/identity";
 import { AccountInfo, AuthenticationResult, PublicClientApplication } from "@azure/msal-node";
 import open from "open";
@@ -75,9 +76,27 @@ class OAuthAuthenticator {
   }
 }
 
+/**
+ * Request-scoped token store for proxy auth mode.
+ * Each tool call carries its own `_auth_token` argument, which is stored
+ * here via AsyncLocalStorage so the authenticator can read it without
+ * global mutable state or race conditions.
+ */
+const proxyAuthStore = new AsyncLocalStorage<string>();
+
 function createAuthenticator(type: string, tenantId?: string): () => Promise<string> {
   logger.debug(`Creating authenticator of type '${type}' with tenantId='${tenantId ?? "undefined"}'`);
   switch (type) {
+    case "proxy":
+      logger.debug(`Authenticator: Using proxy authentication (per-request token via _auth_token argument)`);
+      return async () => {
+        const token = proxyAuthStore.getStore();
+        if (!token) {
+          throw new Error("No auth token available for this request. " + "In proxy mode, every tool call must include an '_auth_token' argument.");
+        }
+        return token;
+      };
+
     case "envvar":
       logger.debug(`Authenticator: Using environment variable authentication (ADO_MCP_AUTH_TOKEN)`);
       // Read token from fixed environment variable
@@ -122,4 +141,4 @@ function createAuthenticator(type: string, tenantId?: string): () => Promise<str
       };
   }
 }
-export { createAuthenticator };
+export { createAuthenticator, proxyAuthStore };
